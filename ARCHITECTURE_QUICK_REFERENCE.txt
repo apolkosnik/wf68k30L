@@ -1,0 +1,193 @@
+================================================================================
+                WF68K30L CPU ARCHITECTURE - QUICK REFERENCE
+================================================================================
+
+FILE STRUCTURE & LINE COUNTS:
+┌─────────────────────────────────────────────────┬───────┬──────────────────┐
+│ Module                      Purpose             │ Lines │ Role in Pipeline │
+├─────────────────────────────────────────────────┼───────┼──────────────────┤
+│ wf68k30L_top.vhd             Structural top     │ 1,199 │ Integration      │
+│ wf68k30L_opcode_decoder.vhd  Fetch stage 1      │ 1,332 │ IF (Instruction) │
+│ wf68k30L_control.vhd         Main control       │ 2,533 │ ID/EX (Decode)   │
+│ wf68k30L_alu.vhd             Arithmetic/Logic   │ 1,264 │ EX (Execution)   │
+│ wf68k30L_bus_interface.vhd   Memory interface   │   875 │ Memory access    │
+│ wf68k30L_address_registers   A0-A7 registers   │   678 │ Register file    │
+│ wf68k30L_exception_handler   Exception logic    │   923 │ Exception mgmt   │
+│ wf68k30L_data_registers      D0-D7 registers   │   137 │ Register file    │
+│                            TOTAL              │ 9,398 │                  │
+└─────────────────────────────────────────────────┴───────┴──────────────────┘
+
+CURRENT 3-STAGE PIPELINE:
+┌────────────────────────────────────────────────────────────────────────────┐
+│ STAGE 1: FETCH              STAGE 2: DECODE            STAGE 3: EXECUTE   │
+│ ┌─────────────────────┐     ┌─────────────────┐       ┌──────────────────┐│
+│ │ Opcode Decoder      │     │ Main Controller │       │ ALU + Writeback  ││
+│ │                     │     │                 │       │                  ││
+│ │ • 3-word FIFO       │────▶│ • Fetch States  │──────▶│ • Arithmetic ops ││
+│ │   (D, C, B)         │     │   (17 total)    │       │ • Memory access  ││
+│ │ • Prefetch logic    │     │ • Exec states   │       │ • Condition codes││
+│ │ • Handshake ctrl    │     │   (5 total)     │       │ • Register WB    ││
+│ │ • PC management     │     │ • Hazard detect │       │ • Status update  ││
+│ │                     │     │ • Addressing    │       │                  ││
+│ │ Outputs:            │     │ • Control sig   │       │ Outputs:         ││
+│ │ OP, BIW_0-2, EXT_W  │     │   generation    │       │ ALU_RESULT[63:0] ││
+│ └─────────────────────┘     │                 │       │ CC, SR_OUT       ││
+│                             │ Outputs:        │       │ AR_WR, DR_WR     ││
+│                             │ ALU_INIT,       │       │ DATA_WR/RD       ││
+│                             │ *_MARK_USED,    │       └──────────────────┘│
+│                             │ Control sigs    │                            │
+│                             └─────────────────┘                            │
+└────────────────────────────────────────────────────────────────────────────┘
+
+STATE MACHINES IN MAIN CONTROLLER:
+┌─ FETCH_STATES (17 states) ────────────────────┬─ EXEC_WB_STATES (5 states) ─┐
+│                                                │                              │
+│ START_OP                                       │ IDLE                         │
+│   ↓                                            │   ↓                          │
+│ CALC_AEFF (effective address calc)            │ EXECUTE (ALU running)        │
+│   ↓                                            │   ↓                          │
+│ FETCH_DISPL (displacement word)                │ ADR_PIPELINE                 │
+│   ↓                                            │   ↓                          │
+│ FETCH_EXWORD_1 / FETCH_D_HI/LO                │ WRITEBACK (store result)     │
+│   ↓                                            │   ↓                          │
+│ FETCH_OD_HI/LO / FETCH_ABS_HI/LO              │ WRITE_DEST (update registers)│
+│   ↓                                            │                              │
+│ FETCH_IDATA_B2/B1 (immediate operands)         │                              │
+│   ↓                                            │                              │
+│ FETCH_MEMADR / FETCH_OPERAND (fetch data)     │                              │
+│   ↓                                            │                              │
+│ INIT_EXEC_WB (initialize writeback)            │                              │
+│   ↓                                            │                              │
+│ SLEEP / SWITCH_STATE                          │                              │
+│   ↓                                            │                              │
+│ (back to START_OP)                             │                              │
+│                                                │                              │
+└────────────────────────────────────────────────┴──────────────────────────────┘
+
+CURRENT SCALAR CHARACTERISTICS:
+✓ Single instruction issue per cycle (1-issue)
+✓ Sequential decode from FIFO
+✓ One ALU shared by all instructions
+✓ One register write port per destination type
+✓ One memory port (read OR write, not both)
+✓ Register-in-use flags for hazard detection (ADR_IN_USE, DR_IN_USE)
+✓ Optional NO_PIPELINE mode (fully scalar, no overlap)
+
+KEY SIGNALS FOR HAZARD DETECTION:
+┌─────────────────────────────┬───────────────────────────────────────────────┐
+│ Signal                      │ Purpose                                       │
+├─────────────────────────────┼───────────────────────────────────────────────┤
+│ ADR_MARK_USED               │ Mark address register as in-use               │
+│ ADR_IN_USE (feedback)       │ Address register is currently in-use          │
+│ DR_MARK_USED                │ Mark data register as in-use                  │
+│ DR_IN_USE (feedback)        │ Data register is currently in-use             │
+│ UNMARK                      │ Clear in-use flags after writeback            │
+│ ALU_BSY                     │ ALU currently executing instruction           │
+│ LOOP_BSY                    │ DBcc loop mechanism active                    │
+└─────────────────────────────┴───────────────────────────────────────────────┘
+
+DATA FLOW EXAMPLE - ADD D1, D2:
+┌─────┬──────────────────────────────────────────────────────────────┐
+│ Cyc │ Stage 1 (Fetch)  │  Stage 2 (Decode)     │  Stage 3 (Execute) │
+├─────┼──────────────────┼───────────────────────┼────────────────────┤
+│  1  │ Fetch ADD opcode │ -                     │ -                  │
+│  2  │ Fetch next instr │ Decode ADD            │ -                  │
+│     │                  │ Mark D1, D2 in-use    │                    │
+│  3  │ Fetch next instr │ Fetch operands        │ Execute ADD        │
+│     │                  │ Request D1, D2        │ D2 ← D1 + D2       │
+│  4  │ Fetch next instr │ Wait for result       │ Writeback result   │
+│     │                  │                       │ Clear in-use flags │
+│  5  │ Next instr ready │ Start next (if no dep)│ (next instr ready) │
+└─────┴──────────────────┴───────────────────────┴────────────────────┘
+
+MEMORY INTERFACE:
+┌─────────────────────────────────────────────────────────────────┐
+│ Request Types:                                                  │
+│ • RD_REQ - Read data (with handshake: RD_REQ → DATA_RDY)       │
+│ • WR_REQ - Write data (with handshake: WR_REQ → DATA_RDY)      │
+│ • OPCODE_REQ - Read instruction (OPCODE_REQ → OPCODE_RDY)      │
+│                                                                 │
+│ Bus Protocol: MC68030 compatible asynchronous bus              │
+│ • DSACK handshake for data cycles                              │
+│ • STERM for synchronous termination                            │
+│ • Bus arbitration (3-wire and 2-wire modes)                    │
+└─────────────────────────────────────────────────────────────────┘
+
+================================================================================
+                SUPERSCALAR CONVERSION REQUIREMENTS
+================================================================================
+
+MAJOR CHANGES NEEDED:
+
+1. FETCH STAGE (HIGH EFFORT: 1,332 → 2,664-3,996 lines)
+   ✗ Single decoder → Parallel decoders (2-4)
+   ✗ Single IPIPE → Multiple independent IPIPEs
+   ✗ 1 instr/cycle → 2-4 instr/cycle fetch bandwidth
+   + Alignment logic for variable-length instructions
+   + Inter-decoder synchronization
+
+2. DECODE STAGE (HIGH EFFORT: 2,533 → 5,000-8,000 lines)
+   ✗ Single state machine → Multiple parallel controllers
+   ✗ Register-in-use flags → Register rename tables + scoreboards
+   ✗ Sequential issue → Dynamic issue logic
+   + Reservation stations for operand buffering
+   + Dependency matrices for N instructions
+   + Issue queue and priority encoders
+
+3. EXECUTION STAGE (MEDIUM EFFORT: 1,264 → 2,000-3,000 lines)
+   ✗ Single ALU → Multiple ALUs (2-4)
+   + Result forwarding network (bypass logic)
+   + Out-of-order execution scheduling
+   + Specialized units (multiplier, divider, shifter)
+
+4. MEMORY SUBSYSTEM (MEDIUM EFFORT: 875 → 1,500-2,500 lines)
+   ✗ Single read/write port → Multiple independent ports
+   + Load/store queue for memory ordering
+   + Cache integration (I-cache + D-cache mandatory)
+   + Cache coherency protocols
+
+5. REGISTER FILES (HIGH EFFORT: 815 → 2,000-3,000 lines)
+   ✗ 8 AR + 8 DR (16 total) → 32-64 physical registers
+   + Register rename logic and rename tables
+   + Multi-port register file (4+ read ports, 2+ write ports)
+   + Scoreboard for tracking register readiness
+
+6. WRITEBACK & RETIREMENT (HIGH EFFORT: New component)
+   + Reorder buffer (ROB) - 16-32 entry buffer
+   + In-order retirement logic
+   + Exception handling redesign for speculation
+   + Misprediction recovery logic
+
+COMPLEXITY GROWTH:
+┌──────────┬─────────┬──────────┬────────────┐
+│ Component│ Current │ 2-issue  │ 4-issue    │
+├──────────┼─────────┼──────────┼────────────┤
+│ Total LOC│ ~9,400  │~18,000   │~30,000     │
+│ Growth   │   -     │ 1.9x     │ 3.2x       │
+│ Effort   │   -     │ 12-18mo  │ 24-36mo    │
+│ Clock    │   1x    │ 0.85-0.9x│ 0.60-0.8x  │
+│ Area     │   1x    │ 2.0-2.5x │ 3.0-4.0x   │
+└──────────┴─────────┴──────────┴────────────┘
+
+ALTERNATIVE: DEEPER PIPELINE (LOWER RISK)
+Current: 3-stage → Proposed: 5-7 stage
+Effort: 6-9 months (vs 18-36 months for superscalar)
+Clock improvement: 20-30% (vs 15-40% performance loss for superscalar)
+Area growth: 1.2-1.5x (vs 2-4x for superscalar)
+Complexity: Moderate (vs Very High for superscalar)
+
+================================================================================
+
+KEY INSTRUCTIONS SUPPORTED: ~100 total (68030 subset)
+- Arithmetic: ADD, SUB, MULS, MULU, DIVS, DIVU, ABCD, SBCD, NBCD
+- Logical: AND, OR, EOR, NOT
+- Shift/Rotate: ASL, ASR, LSL, LSR, ROL, ROR, ROXL, ROXR  
+- Bit Field: BFCHG, BFCLR, BFEXTS, BFEXTU, BFFFO, BFINS, BFSET, BFTST
+- Data Move: MOVE, MOVEA, MOVEQ, MOVEM, MOVEP, MOVES
+- Control: BRA, BSR, Bcc, DBcc, JMP, JSR, RTE, RTS, RTR, RTD, TRAP, TRAPcc, STOP
+- Bit Test: BCHG, BCLR, BSET, BTST, CAS, CAS2, TAS, CHK, CHK2, CMP2
+- Status: ANDI_TO_SR, EORI_TO_SR, ORI_TO_SR, MOVE_TO_SR, MOVE_FROM_SR, MOVE_TO_CCR, MOVE_FROM_CCR
+- Special: LEA, PEA, LINK, UNLK, EXG, SWAP, CLR, NEG, NEGX, NOT, TST, EXT, EXTB, MOVEC, MOVE_USP
+- Missing (not implemented): Coprocessor ops, MMU ops, cache ops
+
+================================================================================
